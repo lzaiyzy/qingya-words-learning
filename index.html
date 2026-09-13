@@ -72,9 +72,11 @@
     .topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
     .page-title h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2.1rem); line-height: 1.2; }
     .page-title p { margin: 4px 0 0; color: var(--muted); }
-    .topbar-tools { display: flex; align-items: center; gap: 10px; }
+    .topbar-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
     .accent-picker { display: flex; align-items: center; gap: 7px; min-height: 44px; padding: 4px 5px 4px 11px; background: var(--paper); border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow); color: var(--ink); font-weight: 800; white-space: nowrap; }
     .accent-picker .select { width: auto; min-height: 34px; padding: 5px 27px 5px 9px; border: 0; background-color: var(--soft); font-size: .92rem; }
+    .voice-picker .select { max-width: 180px; }
+    .voice-preview { min-height: 44px; box-shadow: var(--shadow); }
     .today-chip { white-space: nowrap; padding: 9px 14px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.62); color: var(--muted); font-size: .9rem; }
     .view { display: none; animation: viewIn .22s ease both; }
     .view.active { display: block; }
@@ -211,6 +213,9 @@
     .flash-front .question-main { font-family: Georgia, serif; }
     .flash-back .question-main { color: #fff; }
     .flash-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 16px; }
+    .practice-phonics { width: 100%; margin-top: 16px; text-align: left; }
+    .practice-phonics .phonics-piece { min-height: 52px; }
+    .practice-phonics[hidden] { display: none; }
 
     /* ==================== 6. 专项课程：音标、主题与情景口语 ==================== */
     .course-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -317,6 +322,9 @@
     }
     @media (max-width: 640px) {
       .topbar { align-items: flex-start; }
+      .topbar-tools { width: 100%; justify-content: flex-start; }
+      .voice-picker { flex: 1 1 190px; }
+      .voice-picker .select { min-width: 0; max-width: none; flex: 1; }
       .today-chip { display: none; }
       .page-title p { font-size: .9rem; }
       .grid-2, .grid-3, .mode-select, .choice-grid { grid-template-columns: 1fr; }
@@ -362,7 +370,9 @@
       <header class="topbar">
         <div class="page-title"><h1 id="pageTitle">我的单词库</h1><p id="pageSubtitle">整理好单词，学习就更轻松</p></div>
         <div class="topbar-tools">
-          <label class="accent-picker" for="speechLocale"><span>🔊 发音</span><select class="select" id="speechLocale" aria-label="选择英式或美式发音"><option value="en-GB">英式</option><option value="en-US">美式</option></select></label>
+          <label class="accent-picker" for="speechLocale"><span>🔊 口音</span><select class="select" id="speechLocale" aria-label="选择英式或美式发音"><option value="en-GB">英式</option><option value="en-US">美式</option></select></label>
+          <label class="accent-picker voice-picker" for="speechVoice"><span>音色</span><select class="select" id="speechVoice" aria-label="选择具体英语音色"><option value="">自动优选</option></select></label>
+          <button class="btn voice-preview" id="previewVoice" type="button">试听</button>
           <div class="today-chip" id="todayText"></div>
         </div>
       </header>
@@ -1027,7 +1037,7 @@ Clark|/klɑːk/|克拉克`]
     }
     let words = loadWords();
     const DEFAULT_SPEECH_RATE = .7;
-    let settings = { speechRate: DEFAULT_SPEECH_RATE, speechLocale: "en-US" };
+    let settings = { speechRate: DEFAULT_SPEECH_RATE, speechLocale: "en-US", speechVoiceId: "" };
     try {
       const savedSettings=JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
       settings = {...settings, ...savedSettings};
@@ -1035,6 +1045,7 @@ Clark|/klɑːk/|克拉克`]
       if(Number(savedSettings.speechRate)===.82) settings.speechRate=DEFAULT_SPEECH_RATE;
     } catch (_) {}
     settings.speechLocale=settings.speechLocale==="en-GB"?"en-GB":"en-US";
+    settings.speechVoiceId=String(settings.speechVoiceId||"");
     function saveWords() { localStorage.setItem(STORAGE_KEY, JSON.stringify(words)); renderAll(); }
     function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 
@@ -1050,23 +1061,60 @@ Clark|/klɑːk/|克拉克`]
       const el = $("#toast"); el.textContent = message; el.classList.add("show");
       clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove("show"), 2300);
     }
-    // 发音口音是全局设置：单词卡、专项课程、听写和例句朗读会同步切换。
+    /* 发音口音是全局设置：单词卡、专项课程、听写和例句朗读会同步切换。
+       iPhone 会异步加载系统音色，因此既在页面打开时读取，也监听 voiceschanged。
+       “自动优选”会避开 Compact 等精简音色，并优先 Enhanced、Premium、Siri 等高质量音色。 */
+    let speechVoices=[];
+    const normalVoiceLang=function(value){return String(value||"").replace(/_/g,"-").toLowerCase();};
+    const voiceId=function(voice){return String(voice.voiceURI||voice.name||"");};
+    function voiceQualityScore(voice,locale){
+      const name=String(voice.name||"").toLowerCase();
+      const lang=normalVoiceLang(voice.lang);let score=lang===locale.toLowerCase()?100:lang.indexOf("en-")===0?20:0;
+      if(voice.localService!==false)score+=5;if(voice.default)score+=3;
+      if(/premium|enhanced|siri|natural/.test(name))score+=35;
+      // Apple 设备常见的自然英语音色名称；没有这些名称时仍按语言和质量标记排序。
+      if(locale==="en-GB"&&/daniel|martha|serena|arthur|oliver|kate/.test(name))score+=18;
+      if(locale==="en-US"&&/samantha|ava|allison|susan|tom|nathan/.test(name))score+=18;
+      if(/compact|eloquence|novelty/.test(name))score-=45;
+      return score;
+    }
+    function rankedVoices(locale){
+      return speechVoices.filter(function(voice){return normalVoiceLang(voice.lang)===locale.toLowerCase();}).sort(function(a,b){return voiceQualityScore(b,locale)-voiceQualityScore(a,locale)||String(a.name).localeCompare(String(b.name));});
+    }
+    function selectedVoice(locale){
+      const exact=rankedVoices(locale);
+      const saved=exact.find(function(voice){return voiceId(voice)===settings.speechVoiceId;});
+      if(saved)return saved;if(exact.length)return exact[0];
+      return speechVoices.filter(function(voice){return normalVoiceLang(voice.lang).indexOf("en-")===0;}).sort(function(a,b){return voiceQualityScore(b,locale)-voiceQualityScore(a,locale);})[0]||null;
+    }
+    function refreshVoiceList(){
+      if(!("speechSynthesis" in window))return;
+      speechVoices=speechSynthesis.getVoices()||[];
+      const locale=settings.speechLocale==="en-GB"?"en-GB":"en-US";const select=$("#speechVoice");if(!select)return;
+      const choices=rankedVoices(locale);const best=choices[0]||null;select.innerHTML="";
+      const automatic=document.createElement("option");automatic.value="";automatic.textContent=best?"自动优选（"+best.name+"）":"自动优选（等待系统音色）";select.appendChild(automatic);
+      choices.forEach(function(voice){const option=document.createElement("option");option.value=voiceId(voice);option.textContent=voice.name+(voice.default?" · 系统默认":"");select.appendChild(option);});
+      if(choices.some(function(voice){return voiceId(voice)===settings.speechVoiceId;}))select.value=settings.speechVoiceId;
+      else{settings.speechVoiceId="";select.value="";}
+    }
     $("#speechLocale").value=settings.speechLocale;
     $("#speechLocale").addEventListener("change",function(event){
-      settings.speechLocale=event.target.value==="en-GB"?"en-GB":"en-US";
-      saveSettings();
-      toast(settings.speechLocale==="en-GB"?"已切换为英式发音":"已切换为美式发音");
+      settings.speechLocale=event.target.value==="en-GB"?"en-GB":"en-US";settings.speechVoiceId="";refreshVoiceList();saveSettings();
+      toast(settings.speechLocale==="en-GB"?"已切换为英式发音，可点试听选择音色":"已切换为美式发音，可点试听选择音色");
     });
-    // 使用浏览器自带 Web Speech API；按用户选择优先匹配英式或美式语音。
+    $("#speechVoice").addEventListener("change",function(event){settings.speechVoiceId=event.target.value;saveSettings();speak("Welcome to our English class.");});
+    $("#previewVoice").addEventListener("click",function(){speak("Welcome to our English class.");});
+    if("speechSynthesis" in window){
+      refreshVoiceList();setTimeout(refreshVoiceList,300);
+      if(typeof speechSynthesis.addEventListener==="function")speechSynthesis.addEventListener("voiceschanged",refreshVoiceList);
+      else speechSynthesis.onvoiceschanged=refreshVoiceList;
+    }
+    // 使用浏览器自带 Web Speech API；按用户选择的具体音色朗读，没有指定时自动优选。
     function prepareUtterance(text,rate) {
       const utter = new SpeechSynthesisUtterance(text);
       const locale=settings.speechLocale==="en-GB"?"en-GB":"en-US";
-      utter.lang=locale;
-      utter.rate=Number(rate || settings.speechRate || DEFAULT_SPEECH_RATE);
-      const voices=speechSynthesis.getVoices();
-      const normalLang=function(value){return String(value||"").replace("_","-").toLowerCase();};
-      utter.voice=voices.find(function(voice){return normalLang(voice.lang)===locale.toLowerCase();})
-        || voices.find(function(voice){return normalLang(voice.lang).indexOf("en-")===0;}) || null;
+      utter.lang=locale;utter.rate=Number(rate || settings.speechRate || DEFAULT_SPEECH_RATE);utter.pitch=1;utter.volume=1;
+      const currentVoices=speechSynthesis.getVoices();if(currentVoices&&currentVoices.length)speechVoices=currentVoices;utter.voice=selectedVoice(locale);
       return utter;
     }
     function speak(text) {
@@ -1931,6 +1979,21 @@ Clark|/klɑːk/|克拉克`]
     $("#studyUnit").addEventListener("change",()=>{studyIndex=0;renderStudy();});
     $("#studySpeak").addEventListener("click",()=>{const list=byUnit($("#studyUnit").value||"all"); if(list[studyIndex])speak(list[studyIndex].word);});
 
+    /* 记忆练习共用的拼读面板：闪卡直接显示，闯关答题后再显示，避免泄露答案。 */
+    function memoryPhonicsHtml(word,hidden=false){
+      const parts=phonicsParts(word);const syllables=syllableParts(word);
+      return `<section class="phonics-box practice-phonics" data-practice-phonics ${hidden?"hidden":""}><div class="memory-box-head"><h3>🔤 拼读这个单词</h3><button class="tiny-action" data-practice-word>🔊 整词朗读</button></div><div class="syllable-guide"><div class="syllable-title"><span>音节切分：<b style="color:#d07b16">橙色是元音</b>，绿色是辅音</span><button class="tiny-action" data-practice-syllable-full>▶ 音节连读</button></div><div class="syllable-row">${syllables.map((part,index)=>`${index?'<span class="syllable-cut">/</span>':''}<button class="syllable-piece" data-practice-syllable="${index}" aria-label="朗读音节 ${esc(part)}">${syllableMarkup(part)}</button>`).join("")}</div></div><div class="syllable-title"><span>字母组合拼读</span><button class="tiny-action" data-practice-phonics-full>▶ 字母音跟读</button></div><div class="phonics-chunks">${parts.map((part,index)=>`${index?'<span class="phonics-divider">·</span>':''}<button class="phonics-piece" data-practice-phonics-part="${index}" aria-label="朗读 ${esc(part)}"><strong>${esc(part)}</strong><small>${esc(phonicsSound(part,index,parts))}</small></button>`).join("")}</div></section>`;
+    }
+    function bindMemoryPhonics(root,word){
+      const panel=$("[data-practice-phonics]",root);if(!panel)return;
+      const parts=phonicsParts(word);const syllables=syllableParts(word);
+      $("[data-practice-word]",panel).onclick=()=>speak(word.word);
+      $("[data-practice-syllable-full]",panel).onclick=()=>playSyllableSequence(word,panel);
+      $$('[data-practice-syllable]',panel).forEach(button=>button.onclick=()=>speak(syllables[Number(button.dataset.practiceSyllable)]));
+      $("[data-practice-phonics-full]",panel).onclick=()=>playPhonicsSequence(word,panel);
+      $$('[data-practice-phonics-part]',panel).forEach(button=>button.onclick=()=>{const index=Number(button.dataset.practicePhonicsPart);speakPhonicsPiece(parts[index],index,parts);});
+    }
+
     /* ==================== 7. 记忆闯关 ==================== */
     let memoryState = null, memoryFlashState = null;
     function renderMemorySetup() {
@@ -1955,8 +2018,10 @@ Clark|/klɑːk/|克拉克`]
       const w=s.questions[s.index]; let dir=s.direction; if(dir==="mixed")dir=Math.random()>.5?"en-zh":"zh-en";
       const answer=dir==="en-zh"?w.meaning:w.word; const pool=shuffle(words.filter(x=>x.id!==w.id)).slice(0,3).map(x=>dir==="en-zh"?x.meaning:x.word);
       const choices=shuffle([answer,...pool]); s.locked=false; s.current={w,answer};
-      $("#memoryChallenge").innerHTML=`<div class="practice-stage"><div class="practice-top"><b>${s.index+1} / ${s.questions.length}</b><div class="progress"><span style="width:${s.index/s.questions.length*100}%"></span></div><span>答对 ${s.correct}</span></div><article class="card question-card"><div class="question-hint">${dir==="en-zh"?"请选择正确的中文释义":"请选择正确的英文单词"}</div><div class="question-main">${esc(dir==="en-zh"?w.word:w.meaning)}</div>${dir==="en-zh"?`<div class="ipa">${esc(w.phonetic)}</div>`:""}<div class="choice-grid">${choices.map(c=>`<button class="choice" data-choice="${esc(c)}">${esc(c)}</button>`).join("")}</div><p class="feedback" id="memoryFeedback"></p><button class="btn btn-primary" id="memoryNext" hidden>下一题 →</button></article></div>`;
-      $$("[data-choice]",$("#memoryChallenge")).forEach(btn=>btn.onclick=()=>judgeMemory(btn));
+      const root=$("#memoryChallenge");
+      root.innerHTML=`<div class="practice-stage"><div class="practice-top"><b>${s.index+1} / ${s.questions.length}</b><div class="progress"><span style="width:${s.index/s.questions.length*100}%"></span></div><span>答对 ${s.correct}</span></div><article class="card question-card"><div class="question-hint">${dir==="en-zh"?"请选择正确的中文释义":"请选择正确的英文单词"}</div><div class="question-main">${esc(dir==="en-zh"?w.word:w.meaning)}</div>${dir==="en-zh"?`<div class="ipa">${esc(w.phonetic)}</div>`:""}<div class="choice-grid">${choices.map(c=>`<button class="choice" data-choice="${esc(c)}">${esc(c)}</button>`).join("")}</div><p class="feedback" id="memoryFeedback"></p>${memoryPhonicsHtml(w,true)}<button class="btn btn-primary" id="memoryNext" hidden style="margin-top:16px">下一题 →</button></article></div>`;
+      bindMemoryPhonics(root,w);
+      $$("[data-choice]",root).forEach(btn=>btn.onclick=()=>judgeMemory(btn));
       $("#memoryNext").onclick=()=>{s.index++;renderMemoryQuestion();};
     }
     function judgeMemory(btn) {
@@ -1964,6 +2029,7 @@ Clark|/klɑːk/|克拉克`]
       $$("[data-choice]",$("#memoryChallenge")).forEach(b=>{b.disabled=true;if(b.dataset.choice===s.current.answer)b.classList.add("correct");});
       if(ok){s.correct++;s.current.w.familiarity=Math.min(2,s.current.w.familiarity+1);$("#memoryFeedback").textContent="答对啦！";$("#memoryFeedback").className="feedback ok";}
       else{btn.classList.add("wrong");s.unknown++;s.current.w.familiarity=0;$("#memoryFeedback").textContent=`正确答案：${s.current.answer}`;$("#memoryFeedback").className="feedback bad";}
+      const phonics=$("[data-practice-phonics]",$("#memoryChallenge"));if(phonics)phonics.hidden=false;
       saveWords();$("#memoryNext").hidden=false;
     }
     function renderMemoryReport() {
@@ -1974,11 +2040,29 @@ Clark|/klɑːk/|克拉克`]
 
     /* ==================== 8. 闪卡记忆 ==================== */
     function renderFlashSetup() {
-      $("#memoryFlash").innerHTML=`<div class="card panel setup-card"><div class="section-head"><h2>单词闪卡</h2><span class="pill">点击卡片翻面</span></div><div class="grid-2"><div class="field"><label>学习单元</label><select class="select" id="flashUnit">${unitOptions()}</select></div><div class="field"><label>卡片数量</label><select class="select" id="flashCount"><option>5</option><option selected>10</option><option>20</option></select></div></div><button class="btn btn-accent btn-lg" id="startFlash" style="width:100%;margin-top:22px">开始翻卡</button></div>`;
+      $("#memoryFlash").innerHTML=`<div class="card panel setup-card"><div class="section-head"><h2>单词闪卡</h2><span class="pill">点击卡片翻面</span></div><div class="grid-2"><div class="field"><label>学习单元</label><select class="select" id="flashUnit">${unitOptions()}</select></div><div class="field"><label for="flashCount">卡片数量（可自定义）</label><input class="input" type="number" id="flashCount" min="1" step="1" inputmode="numeric" value="10"><small class="muted">同一次练习不会重复出现同一个单词</small></div></div><button class="btn btn-accent btn-lg" id="startFlash" style="width:100%;margin-top:22px">开始翻卡</button></div>`;
       $("#startFlash").onclick=startFlash;
     }
-    function startFlash(){const list=prioritizedPool(byUnit($("#flashUnit").value)).slice(0,Number($("#flashCount").value));if(!list.length)return toast("这个单元还没有单词");memoryFlashState={list,index:0,known:0,unknown:0};renderFlashCard();}
-    function renderFlashCard(){const s=memoryFlashState;if(s.index>=s.list.length)return renderFlashReport();const w=s.list[s.index];$("#memoryFlash").innerHTML=`<div class="practice-stage"><div class="practice-top"><b>${s.index+1} / ${s.list.length}</b><div class="progress"><span style="width:${s.index/s.list.length*100}%"></span></div></div><div class="flashcard" id="flashCard" role="button" tabindex="0" aria-label="点击翻面"><div class="flash-inner"><div class="flash-face flash-front"><span class="pill">点击查看答案</span><div class="question-main">${esc(w.word)}</div><div class="ipa">${esc(w.phonetic)}</div></div><div class="flash-face flash-back"><div class="question-main">${esc(w.meaning)}</div><p>${esc(w.extension||"").replace(/\n/g,"<br>")}</p></div></div></div><div class="flash-controls"><button class="btn btn-danger btn-lg" data-flash-mark="unknown">还不认识</button><button class="btn btn-primary btn-lg" data-flash-mark="known">我认识</button></div></div>`;const card=$("#flashCard");card.onclick=()=>card.classList.toggle("flipped");card.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();card.click();}};$$('[data-flash-mark]').forEach(b=>b.onclick=()=>{if(b.dataset.flashMark==="known"){s.known++;w.familiarity=Math.min(2,w.familiarity+1);}else{s.unknown++;w.familiarity=0;}saveWords();s.index++;renderFlashCard();});}
+    function startFlash(){
+      const pool=prioritizedPool(byUnit($("#flashUnit").value));
+      if(!pool.length)return toast("这个单元还没有单词");
+      /* 按英文拼写去重，确保同一轮闪卡不会反复出现同一个单词。 */
+      const seen=new Set();
+      const uniqueList=pool.filter(item=>{const key=item.word.trim().toLowerCase();if(!key||seen.has(key))return false;seen.add(key);return true;});
+      const entered=Math.floor(Number($("#flashCount").value));
+      const requested=Number.isFinite(entered)&&entered>0?entered:10;
+      const count=Math.min(requested,uniqueList.length);
+      if(requested>uniqueList.length)toast(`当前范围有 ${uniqueList.length} 个不重复单词，已全部加入本次闪卡`);
+      memoryFlashState={list:uniqueList.slice(0,count),index:0,known:0,unknown:0};
+      renderFlashCard();
+    }
+    function renderFlashCard(){
+      const s=memoryFlashState;if(s.index>=s.list.length)return renderFlashReport();const w=s.list[s.index];const root=$("#memoryFlash");
+      root.innerHTML=`<div class="practice-stage"><div class="practice-top"><b>${s.index+1} / ${s.list.length}</b><div class="progress"><span style="width:${s.index/s.list.length*100}%"></span></div></div><div class="flashcard" id="flashCard" role="button" tabindex="0" aria-label="点击翻面"><div class="flash-inner"><div class="flash-face flash-front"><span class="pill">点击查看答案</span><div class="question-main">${esc(w.word)}</div><div class="ipa">${esc(w.phonetic)}</div></div><div class="flash-face flash-back"><div class="question-main">${esc(w.meaning)}</div><p>${esc(w.extension||"").replace(/\n/g,"<br>")}</p></div></div></div>${memoryPhonicsHtml(w)}<div class="flash-controls"><button class="btn btn-danger btn-lg" data-flash-mark="unknown">还不认识</button><button class="btn btn-primary btn-lg" data-flash-mark="known">我认识</button></div></div>`;
+      bindMemoryPhonics(root,w);
+      const card=$("#flashCard");card.onclick=()=>card.classList.toggle("flipped");card.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();card.click();}};
+      $$('[data-flash-mark]',root).forEach(b=>b.onclick=()=>{if(b.dataset.flashMark==="known"){s.known++;w.familiarity=Math.min(2,w.familiarity+1);}else{s.unknown++;w.familiarity=0;}saveWords();s.index++;renderFlashCard();});
+    }
     function renderFlashReport(){const s=memoryFlashState;$("#memoryFlash").innerHTML=`<article class="card report" style="text-align:center"><div style="font-size:3rem">✓</div><h2>闪卡练习完成</h2><div class="grid-2" style="margin:24px 0"><div class="card panel"><strong style="font-size:1.8rem;color:var(--success)">${s.known}</strong><br>认识</div><div class="card panel"><strong style="font-size:1.8rem;color:var(--danger)">${s.unknown}</strong><br>不认识</div></div><button class="btn btn-primary" id="flashAgain">继续练习</button></article>`;$("#flashAgain").onclick=renderFlashSetup;}
     $$('[data-memory-tab]').forEach(btn=>btn.addEventListener("click",()=>{$$('[data-memory-tab]').forEach(b=>b.classList.toggle("active",b===btn));const flash=btn.dataset.memoryTab==="flash";$("#memoryChallenge").hidden=flash;$("#memoryFlash").hidden=!flash;flash?renderFlashSetup():renderMemorySetup();}));
 

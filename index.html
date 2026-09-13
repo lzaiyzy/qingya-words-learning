@@ -1094,7 +1094,7 @@ Clark|/klɑːk/|克拉克`]
     $("#learningProfile").addEventListener("change",function(event){
       const next=event.target.value==="grade7"?"grade7":"grade3";if(next===currentProfile)return;
       captureProfileProgress(currentProfile);currentProfile=next;localStorage.setItem(PROFILE_KEY,currentProfile);applyProfileProgress(currentProfile);localStorage.setItem(STORAGE_KEY,JSON.stringify(words));
-      studyIndex=0;memoryState=null;memoryFlashState=null;dictationState=null;if("speechSynthesis" in window)speechSynthesis.cancel();
+      studyIndex=0;memoryState=null;memoryFlashState=null;dictationState=null;stopSpeech();
       $("#searchInput").value="";$("#libraryUnitFilter").value="all";renderMemorySetup();renderFlashSetup();renderDictationSetup();renderAll();
       toast("已切换到"+LEARNING_PROFILES[currentProfile].label+"，学习记录互不混用");
     });
@@ -1102,6 +1102,13 @@ Clark|/klɑːk/|克拉克`]
        iPhone 会异步加载系统音色，因此既在页面打开时读取，也监听 voiceschanged。
        “自动优选”会避开 Compact 等精简音色，并优先 Enhanced、Premium、Siri 等高质量音色。 */
     let speechVoices=[];
+    let fallbackAudio=null;
+    let fallbackVoiceNoticeShown=false;
+    // 遇到少数“接口存在但没有声音”的浏览器时，可在网址后加 ?voice=compat 强制使用兼容发音。
+    const forceCompatSpeech=/(?:^|[?&])voice=compat(?:&|$)/i.test(location.search);
+    function hasNativeSpeech(){
+      return !forceCompatSpeech && typeof window.speechSynthesis!=="undefined" && typeof window.SpeechSynthesisUtterance==="function" && typeof window.speechSynthesis.speak==="function";
+    }
     const normalVoiceLang=function(value){return String(value||"").replace(/_/g,"-").toLowerCase();};
     const voiceId=function(voice){return String(voice.voiceURI||voice.name||"");};
     function voiceQualityScore(voice,locale){
@@ -1125,9 +1132,13 @@ Clark|/klɑːk/|克拉克`]
       return speechVoices.filter(function(voice){return normalVoiceLang(voice.lang).indexOf("en-")===0;}).sort(function(a,b){return voiceQualityScore(b,locale)-voiceQualityScore(a,locale);})[0]||null;
     }
     function refreshVoiceList(){
-      if(!("speechSynthesis" in window))return;
+      const select=$("#speechVoice");if(!select)return;
+      if(!hasNativeSpeech()){
+        speechVoices=[];select.innerHTML='<option value="">华为兼容发音（联网）</option>';select.value="";select.disabled=true;return;
+      }
+      select.disabled=false;
       speechVoices=speechSynthesis.getVoices()||[];
-      const locale=settings.speechLocale==="en-GB"?"en-GB":"en-US";const select=$("#speechVoice");if(!select)return;
+      const locale=settings.speechLocale==="en-GB"?"en-GB":"en-US";
       const choices=rankedVoices(locale);const best=choices[0]||null;select.innerHTML="";
       const automatic=document.createElement("option");automatic.value="";automatic.textContent=best?"自动优选（"+best.name+"）":"自动优选（等待系统音色）";select.appendChild(automatic);
       choices.forEach(function(voice){const option=document.createElement("option");option.value=voiceId(voice);option.textContent=voice.name+(voice.default?" · 系统默认":"");select.appendChild(option);});
@@ -1141,12 +1152,14 @@ Clark|/klɑːk/|克拉克`]
     });
     $("#speechVoice").addEventListener("change",function(event){settings.speechVoiceId=event.target.value;saveSettings();speak("Welcome to our English class.");});
     $("#previewVoice").addEventListener("click",function(){speak("Welcome to our English class.");});
-    if("speechSynthesis" in window){
-      refreshVoiceList();setTimeout(refreshVoiceList,300);
+    refreshVoiceList();
+    if(hasNativeSpeech()){
+      setTimeout(refreshVoiceList,300);
       if(typeof speechSynthesis.addEventListener==="function")speechSynthesis.addEventListener("voiceschanged",refreshVoiceList);
       else speechSynthesis.onvoiceschanged=refreshVoiceList;
     }
-    // 使用浏览器自带 Web Speech API；按用户选择的具体音色朗读，没有指定时自动优选。
+    /* 优先使用浏览器自带 Web Speech API。华为浏览器没有该接口时，自动使用 HTTPS
+       备用发音；仍然是纯前端，不需要账号或服务器，但备用发音需要手机联网。 */
     function prepareUtterance(text,rate) {
       const utter = new SpeechSynthesisUtterance(text);
       const locale=settings.speechLocale==="en-GB"?"en-GB":"en-US";
@@ -1154,10 +1167,43 @@ Clark|/klɑːk/|克拉克`]
       const currentVoices=speechSynthesis.getVoices();if(currentVoices&&currentVoices.length)speechVoices=currentVoices;utter.voice=selectedVoice(locale);
       return utter;
     }
+    function stopSpeech(){
+      if(hasNativeSpeech())speechSynthesis.cancel();
+      if(fallbackAudio){fallbackAudio.__qingyaCancelled=true;fallbackAudio.onended=null;fallbackAudio.onerror=null;fallbackAudio.pause();fallbackAudio.removeAttribute("src");fallbackAudio.load();fallbackAudio=null;}
+    }
+    function fallbackVoiceUrl(text){
+      const type=settings.speechLocale==="en-GB"?1:2;
+      return "https://dict.youdao.com/dictvoice?audio="+encodeURIComponent(String(text||""))+"&type="+type;
+    }
+    function playFallbackSpeech(text,rate,onend,onerror){
+      const audio=new Audio(fallbackVoiceUrl(text));let finished=false;
+      fallbackAudio=audio;audio.preload="auto";audio.volume=1;
+      audio.playbackRate=Math.max(.55,Math.min(1.05,Number(rate||settings.speechRate||DEFAULT_SPEECH_RATE)));
+      if("preservesPitch" in audio)audio.preservesPitch=true;
+      const done=function(ok){
+        if(finished||audio.__qingyaCancelled)return;finished=true;if(fallbackAudio===audio)fallbackAudio=null;
+        if(ok){if(typeof onend==="function")onend();}
+        else{toast("备用发音加载失败，请检查网络，或改用 Chrome / Edge 浏览器");if(typeof onerror==="function")onerror();}
+      };
+      audio.onended=function(){done(true);};audio.onerror=function(){done(false);};
+      const promise=audio.play();if(promise&&typeof promise.catch==="function")promise.catch(function(){done(false);});
+      if(!fallbackVoiceNoticeShown){fallbackVoiceNoticeShown=true;toast("已自动使用华为兼容发音（需要联网）");}
+      return audio;
+    }
+    function speakWithOptions(text,options){
+      const opts=options||{};if(opts.reset!==false)stopSpeech();
+      if(hasNativeSpeech()){
+        try{
+          const utter=opts.phonics?preparePhonicsUtterance(text,opts.rate):prepareUtterance(text,opts.rate);
+          if(typeof opts.onend==="function")utter.onend=opts.onend;
+          if(typeof opts.onerror==="function")utter.onerror=opts.onerror;
+          speechSynthesis.speak(utter);return utter;
+        }catch(_){/* 接口存在但调用失败时，继续尝试兼容发音。 */}
+      }
+      return playFallbackSpeech(text,opts.rate,opts.onend,opts.onerror);
+    }
     function speak(text) {
-      if (!("speechSynthesis" in window)) return toast("当前浏览器不支持语音朗读");
-      speechSynthesis.cancel();
-      speechSynthesis.speak(prepareUtterance(text));
+      return speakWithOptions(text,{reset:true});
     }
 
     // 华为浏览器所在网络若无法访问主 CDN，识别时自动尝试备用地址。
@@ -1255,26 +1301,23 @@ Clark|/klɑːk/|克拉克`]
     function defaultAssociation(word) { return `把“${word.meaning.split(/[；，、]/)[0]}”想成一个清楚的小画面，同时大声说出 ${word.word}。`; }
     // 浏览器语音的 volume 最大值是 1；拼读统一强制最大音量，并略微放慢、提高音高以便孩子听清。
     function preparePhonicsUtterance(text,rate){const utter=prepareUtterance(text,rate||.54);utter.volume=1;utter.pitch=1.06;return utter;}
-    function speakPhonicsText(text){if(!("speechSynthesis" in window))return toast("当前浏览器不支持语音朗读");speechSynthesis.cancel();speechSynthesis.speak(preparePhonicsUtterance(text));}
+    function speakPhonicsText(text){return speakWithOptions(text,{rate:.54,phonics:true,reset:true});}
     function speakPhonicsPiece(part,index,parts) { speakPhonicsText(phonicsCue(part,index,parts)); }
     function playPhonicsSequence(word,root) {
-      if (!("speechSynthesis" in window)) return toast("当前浏览器不支持语音朗读");
-      speechSynthesis.cancel(); const parts=phonicsParts(word); let index=0;
+      stopSpeech(); const parts=phonicsParts(word); let index=0;
       const playNext=()=>{
         $$(".phonics-piece",root).forEach((button,i)=>button.classList.toggle("playing",i===index));
         if(index>=parts.length){ $$(".phonics-piece",root).forEach(button=>button.classList.remove("playing")); speak(word.word); return; }
-        const utter=preparePhonicsUtterance(phonicsCue(parts[index],index,parts),.52);
-        utter.onend=()=>{index++;playNext();}; utter.onerror=()=>{index++;playNext();}; speechSynthesis.speak(utter);
+        speakWithOptions(phonicsCue(parts[index],index,parts),{rate:.52,phonics:true,reset:false,onend:()=>{index++;playNext();},onerror:()=>{$$(".phonics-piece",root).forEach(button=>button.classList.remove("playing"));}});
       };
       playNext();
     }
     function playSyllableSequence(word,root) {
-      if (!("speechSynthesis" in window)) return toast("当前浏览器不支持语音朗读");
-      speechSynthesis.cancel(); const parts=syllableParts(word); let index=0;
+      stopSpeech(); const parts=syllableParts(word); let index=0;
       const playNext=function(){
         $$(".syllable-piece",root).forEach(function(button,i){button.classList.toggle("playing",i===index);});
         if(index>=parts.length){$$(".syllable-piece",root).forEach(function(button){button.classList.remove("playing");});speak(word.word);return;}
-        const utter=preparePhonicsUtterance(parts[index],.56);utter.onend=function(){index++;playNext();};utter.onerror=function(){index++;playNext();};speechSynthesis.speak(utter);
+        speakWithOptions(parts[index],{rate:.56,phonics:true,reset:false,onend:function(){index++;playNext();},onerror:function(){$$(".syllable-piece",root).forEach(function(button){button.classList.remove("playing");});}});
       };
       playNext();
     }
@@ -1708,9 +1751,8 @@ Clark|/klɑːk/|克拉克`]
     }
     function playSpeakingSequence(scene,index){
       if(index>=scene.sentences.length)return toast("这个场景跟读完成");
-      if(!("speechSynthesis" in window))return toast("当前浏览器不支持语音朗读");
-      if(index===0)speechSynthesis.cancel();
-      const utter=prepareUtterance(scene.sentences[index][0]);utter.onend=function(){playSpeakingSequence(scene,index+1);};utter.onerror=function(){playSpeakingSequence(scene,index+1);};speechSynthesis.speak(utter);
+      if(index===0)stopSpeech();
+      speakWithOptions(scene.sentences[index][0],{reset:false,onend:function(){playSpeakingSequence(scene,index+1);}});
     }
     $("#speakingSceneList").addEventListener("click",function(event){const button=event.target.closest("[data-speaking-scene]");if(!button)return;selectedSpeakingScene=button.dataset.speakingScene;renderSpeakingScenes();});
     $("#speakingSceneContent").addEventListener("click",function(event){
@@ -2129,7 +2171,7 @@ Clark|/klɑːk/|克拉克`]
       $("#dictationRoot").innerHTML=`<div class="practice-stage"><div class="practice-top"><button class="btn btn-ghost" id="dictExit" type="button">← 返回设置</button><b>${s.index+1} / ${s.list.length}</b><div class="progress"><span style="width:${s.index/s.list.length*100}%"></span></div><span>答对 ${s.correct}</span></div><article class="card question-card"><div class="question-hint">${s.mode==="sound"?"点击喇叭听发音，然后写出单词":"根据中文释义，写出英文单词"}</div>${s.mode==="sound"?`<button class="speak-btn" id="dictSpeak" aria-label="播放发音">🔊</button>`:`<div class="question-main">${esc(w.meaning)}</div>`}<form class="answer-line" id="dictForm"><input class="input" id="dictAnswer" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="在这里输入英文单词" aria-label="听写答案"><button class="btn btn-primary btn-lg" type="submit">提交</button></form><p class="feedback" id="dictFeedback"></p><button class="btn btn-primary" id="dictNext" hidden>下一题 →</button></article></div>`;
       if(s.mode==="sound"){$("#dictSpeak").onclick=()=>speak(w.word);setTimeout(()=>speak(w.word),320);}
       setTimeout(()=>$("#dictAnswer").focus(),100);$("#dictForm").onsubmit=e=>{e.preventDefault();judgeDictation();};$("#dictNext").onclick=()=>{s.index++;renderDictationQuestion();};
-      $("#dictExit").onclick=function(){if(confirm("听写还没有完成，确定返回设置吗？已提交的错题记录会保留。")){if("speechSynthesis" in window)speechSynthesis.cancel();dictationState=null;renderDictationSetup();}};
+      $("#dictExit").onclick=function(){if(confirm("听写还没有完成，确定返回设置吗？已提交的错题记录会保留。")){stopSpeech();dictationState=null;renderDictationSetup();}};
     }
     function judgeDictation(){const s=dictationState;if(s.answered)return;const w=s.list[s.index];const answer=$("#dictAnswer").value.trim().toLowerCase();if(!answer)return toast("请先写下答案");s.answered=true;const ok=answer===w.word.toLowerCase();if(ok){s.correct++;w.familiarity=Math.min(2,w.familiarity+1);$("#dictFeedback").textContent="✓ 拼写正确，真棒！";$("#dictFeedback").className="feedback ok";}else{w.wrongCount++;w.familiarity=0;s.mistakes.push({word:w.word,yours:answer,meaning:w.meaning});$("#dictFeedback").textContent=`正确答案是：${w.word}`;$("#dictFeedback").className="feedback bad";}saveWords();$("#dictAnswer").disabled=true;$("#dictForm button").hidden=true;$("#dictNext").hidden=false;$("#dictNext").focus();}
     function renderDictationReport(){const s=dictationState;const rate=Math.round(s.correct/s.list.length*100);$("#dictationRoot").innerHTML=`<article class="card report"><div class="score-ring" style="--score:${rate}%"><strong>${rate}%</strong></div><h2 style="text-align:center">听写完成</h2><p class="muted" style="text-align:center">共 ${s.list.length} 题，答对 ${s.correct} 题</p>${s.mistakes.length?`<h3>本次错词</h3><div class="mistake-list">${s.mistakes.map(m=>`<div class="mistake-item"><span><b>${esc(m.word)}</b> · ${esc(m.meaning)}</span><span>你的答案：${esc(m.yours)}</span></div>`).join("")}</div>`:`<div class="empty">全部正确，一颗小星星送给你！ ★</div>`}<div class="grid-2"><button class="btn" id="dictBack">返回设置</button><button class="btn btn-primary" id="dictAgain">再练一次</button></div></article>`;$("#dictBack").onclick=renderDictationSetup;$("#dictAgain").onclick=renderDictationSetup;}

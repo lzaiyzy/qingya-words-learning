@@ -363,13 +363,14 @@
         <button class="nav-btn" data-view="dictation"><span class="nav-icon">♫</span>听写练习</button>
         <button class="nav-btn" data-view="wrongbook"><span class="nav-icon">✎</span>错题本</button>
       </nav>
-      <div class="sidebar-foot">所有学习数据仅保存在这台设备的浏览器中。</div>
+      <div class="sidebar-foot">两个学习账号的进度仅保存在这台设备的浏览器中。</div>
     </aside>
 
     <main class="main">
       <header class="topbar">
         <div class="page-title"><h1 id="pageTitle">我的单词库</h1><p id="pageSubtitle">整理好单词，学习就更轻松</p></div>
         <div class="topbar-tools">
+          <label class="accent-picker profile-picker" for="learningProfile"><span>👤 账号</span><select class="select" id="learningProfile" aria-label="切换学习账号"><option value="grade3">三年级</option><option value="grade7">初一</option></select></label>
           <label class="accent-picker" for="speechLocale"><span>🔊 口音</span><select class="select" id="speechLocale" aria-label="选择英式或美式发音"><option value="en-GB">英式</option><option value="en-US">美式</option></select></label>
           <label class="accent-picker voice-picker" for="speechVoice"><span>音色</span><select class="select" id="speechVoice" aria-label="选择具体英语音色"><option value="">自动优选</option></select></label>
           <button class="btn voice-preview" id="previewVoice" type="button">试听</button>
@@ -516,6 +517,8 @@
     /* ==================== 1. 数据层：示例数据与本地存储 ==================== */
     const STORAGE_KEY = "qingya_words_v1";
     const SETTINGS_KEY = "qingya_settings_v1";
+    const PROFILE_KEY = "qingya_active_profile_v1";
+    const PROFILE_PROGRESS_KEY = "qingya_profile_progress_v1";
     const GRADE3A_IMPORT_KEY = "qingya_grade3a_import_v1";
     const GRADE3A_VERSION = "2026-09-13-full-units-v1";
     const GRADE7A_IMPORT_KEY = "qingya_grade7a_import_v1";
@@ -1036,6 +1039,31 @@ Clark|/klɑːk/|克拉克`]
       return list;
     }
     let words = loadWords();
+    /* 两个“账号”都是当前浏览器内的学习档案：只限制可见年级并分别保存收藏、熟悉度和错题次数。
+       纯前端网页没有服务器，不能把这种分级当作真正的网络账号安全权限。 */
+    const LEARNING_PROFILES={grade3:{label:"三年级账号"},grade7:{label:"初一账号"}};
+    let currentProfile=localStorage.getItem(PROFILE_KEY)==="grade7"?"grade7":"grade3";
+    let profileProgress={grade3:{},grade7:{}};
+    try{
+      const savedProgress=JSON.parse(localStorage.getItem(PROFILE_PROGRESS_KEY)||"{}");
+      if(savedProgress&&typeof savedProgress==="object")profileProgress={grade3:savedProgress.grade3||{},grade7:savedProgress.grade7||{}};
+    }catch(_){}
+    function profileAllowsWord(word,profile){
+      const unit=String(word&&word.unit||"");
+      if(/^三年级/.test(unit))return profile==="grade3";
+      if(/^初一/.test(unit))return profile==="grade7";
+      return true;
+    }
+    function accessibleWords(){return words.filter(function(word){return profileAllowsWord(word,currentProfile);});}
+    function captureProfileProgress(profile){
+      const map={};words.filter(function(word){return profileAllowsWord(word,profile);}).forEach(function(word){map[word.id]={favorite:Boolean(word.favorite),familiarity:Number(word.familiarity)||0,wrongCount:Number(word.wrongCount)||0};});
+      profileProgress[profile]=map;localStorage.setItem(PROFILE_PROGRESS_KEY,JSON.stringify(profileProgress));
+    }
+    function applyProfileProgress(profile){
+      const map=profileProgress[profile]||{};words.filter(function(word){return profileAllowsWord(word,profile);}).forEach(function(word){const saved=map[word.id];word.favorite=saved?Boolean(saved.favorite):false;word.familiarity=saved?Math.max(0,Math.min(2,Number(saved.familiarity)||0)):0;word.wrongCount=saved?Math.max(0,Number(saved.wrongCount)||0):0;});
+    }
+    Object.keys(LEARNING_PROFILES).forEach(function(profile){if(!profileProgress[profile]||!Object.keys(profileProgress[profile]).length)captureProfileProgress(profile);});
+    applyProfileProgress(currentProfile);
     const DEFAULT_SPEECH_RATE = .7;
     let settings = { speechRate: DEFAULT_SPEECH_RATE, speechLocale: "en-US", speechVoiceId: "" };
     try {
@@ -1046,7 +1074,7 @@ Clark|/klɑːk/|克拉克`]
     } catch (_) {}
     settings.speechLocale=settings.speechLocale==="en-GB"?"en-GB":"en-US";
     settings.speechVoiceId=String(settings.speechVoiceId||"");
-    function saveWords() { localStorage.setItem(STORAGE_KEY, JSON.stringify(words)); renderAll(); }
+    function saveWords() { captureProfileProgress(currentProfile);localStorage.setItem(STORAGE_KEY, JSON.stringify(words)); renderAll(); }
     function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 
     /* ==================== 2. 通用工具 ==================== */
@@ -1054,13 +1082,22 @@ Clark|/klɑːk/|克拉克`]
     const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
     const esc = (text="") => String(text).replace(/[&<>"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[char]));
     const shuffle = array => [...array].sort(() => Math.random() - .5);
-    const uniqueUnits = () => [...new Set(words.map(w => w.unit))].sort((a,b) => a.localeCompare(b,"zh-CN"));
-    const byUnit = unit => unit === "all" ? [...words] : words.filter(w => w.unit === unit);
+    const uniqueUnits = () => [...new Set(accessibleWords().map(w => w.unit))].sort((a,b) => a.localeCompare(b,"zh-CN"));
+    const byUnit = unit => unit === "all" ? [...accessibleWords()] : accessibleWords().filter(w => w.unit === unit);
     let toastTimer;
     function toast(message) {
       const el = $("#toast"); el.textContent = message; el.classList.add("show");
       clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove("show"), 2300);
     }
+    // 切换账号时保存当前账号的练习记录，再加载另一个账号自己的记录和年级词库。
+    $("#learningProfile").value=currentProfile;
+    $("#learningProfile").addEventListener("change",function(event){
+      const next=event.target.value==="grade7"?"grade7":"grade3";if(next===currentProfile)return;
+      captureProfileProgress(currentProfile);currentProfile=next;localStorage.setItem(PROFILE_KEY,currentProfile);applyProfileProgress(currentProfile);localStorage.setItem(STORAGE_KEY,JSON.stringify(words));
+      studyIndex=0;memoryState=null;memoryFlashState=null;dictationState=null;if("speechSynthesis" in window)speechSynthesis.cancel();
+      $("#searchInput").value="";$("#libraryUnitFilter").value="all";renderMemorySetup();renderFlashSetup();renderDictationSetup();renderAll();
+      toast("已切换到"+LEARNING_PROFILES[currentProfile].label+"，学习记录互不混用");
+    });
     /* 发音口音是全局设置：单词卡、专项课程、听写和例句朗读会同步切换。
        iPhone 会异步加载系统音色，因此既在页面打开时读取，也监听 voiceschanged。
        “自动优选”会避开 Compact 等精简音色，并优先 Enhanced、Premium、Siri 等高质量音色。 */
@@ -1216,14 +1253,17 @@ Clark|/klɑːk/|克拉克`]
       return match && match[1] ? match[1].trim() : "";
     }
     function defaultAssociation(word) { return `把“${word.meaning.split(/[；，、]/)[0]}”想成一个清楚的小画面，同时大声说出 ${word.word}。`; }
-    function speakPhonicsPiece(part,index,parts) { speak(phonicsCue(part,index,parts)); }
+    // 浏览器语音的 volume 最大值是 1；拼读统一强制最大音量，并略微放慢、提高音高以便孩子听清。
+    function preparePhonicsUtterance(text,rate){const utter=prepareUtterance(text,rate||.54);utter.volume=1;utter.pitch=1.06;return utter;}
+    function speakPhonicsText(text){if(!("speechSynthesis" in window))return toast("当前浏览器不支持语音朗读");speechSynthesis.cancel();speechSynthesis.speak(preparePhonicsUtterance(text));}
+    function speakPhonicsPiece(part,index,parts) { speakPhonicsText(phonicsCue(part,index,parts)); }
     function playPhonicsSequence(word,root) {
       if (!("speechSynthesis" in window)) return toast("当前浏览器不支持语音朗读");
       speechSynthesis.cancel(); const parts=phonicsParts(word); let index=0;
       const playNext=()=>{
         $$(".phonics-piece",root).forEach((button,i)=>button.classList.toggle("playing",i===index));
         if(index>=parts.length){ $$(".phonics-piece",root).forEach(button=>button.classList.remove("playing")); speak(word.word); return; }
-        const utter=prepareUtterance(phonicsCue(parts[index],index,parts),.58);
+        const utter=preparePhonicsUtterance(phonicsCue(parts[index],index,parts),.52);
         utter.onend=()=>{index++;playNext();}; utter.onerror=()=>{index++;playNext();}; speechSynthesis.speak(utter);
       };
       playNext();
@@ -1234,7 +1274,7 @@ Clark|/klɑːk/|克拉克`]
       const playNext=function(){
         $$(".syllable-piece",root).forEach(function(button,i){button.classList.toggle("playing",i===index);});
         if(index>=parts.length){$$(".syllable-piece",root).forEach(function(button){button.classList.remove("playing");});speak(word.word);return;}
-        const utter=prepareUtterance(parts[index],.62);utter.onend=function(){index++;playNext();};utter.onerror=function(){index++;playNext();};speechSynthesis.speak(utter);
+        const utter=preparePhonicsUtterance(parts[index],.56);utter.onend=function(){index++;playNext();};utter.onerror=function(){index++;playNext();};speechSynthesis.speak(utter);
       };
       playNext();
     }
@@ -1642,7 +1682,7 @@ Clark|/klɑːk/|克拉克`]
       $("#topicPrevWord").onclick=function(){topicPracticeState.index=(topicPracticeState.index-1+topic.words.length)%topic.words.length;renderTopicPractice();};
       $("#topicNextWord").onclick=function(){topicPracticeState.index=(topicPracticeState.index+1)%topic.words.length;renderTopicPractice();};
       $("[data-topic-syllable-full]",root).onclick=function(){playSyllableSequence(word,root);};
-      $$("[data-topic-syllable]",root).forEach(function(button){button.onclick=function(){speak(syllables[Number(button.dataset.topicSyllable)]);};});
+      $$("[data-topic-syllable]",root).forEach(function(button){button.onclick=function(){speakPhonicsText(syllables[Number(button.dataset.topicSyllable)]);};});
       $("[data-topic-phonics-full]",root).onclick=function(){playPhonicsSequence(word,root);};
       $$("[data-topic-phonics]",root).forEach(function(button){button.onclick=function(){const index=Number(button.dataset.topicPhonics);speakPhonicsPiece(parts[index],index,parts);};});
       $$("[data-topic-pattern]",root).forEach(function(button){button.onclick=function(){speak(button.dataset.topicPattern);};});
@@ -1702,17 +1742,18 @@ Clark|/klɑːk/|克拉克`]
 
     /* ==================== 4. 单词库渲染与增删改 ==================== */
     function renderLibrary() {
-      $("#statTotal").textContent = words.length;
+      const visible=accessibleWords();
+      $("#statTotal").textContent = visible.length;
       $("#statUnits").textContent = uniqueUnits().length;
-      $("#statFav").textContent = words.filter(w=>w.favorite).length;
-      $("#statReview").textContent = words.filter(w=>w.familiarity===0).length;
-      $("#clearAllWordsBtn").disabled = words.length===0;
+      $("#statFav").textContent = visible.filter(w=>w.favorite).length;
+      $("#statReview").textContent = visible.filter(w=>w.familiarity===0).length;
+      $("#clearAllWordsBtn").disabled = visible.length===0;
       const filter = $("#libraryUnitFilter").value || "all";
       $("#libraryUnitFilter").innerHTML = unitOptions(filter);
       const suggestedUnits=[...new Set(uniqueUnits().concat(TOPIC_RESOURCES.map(topicUnitLabel)))];
       $("#unitSuggestions").innerHTML = suggestedUnits.map(u=>`<option value="${esc(u)}">`).join("");
       const key = $("#searchInput").value.trim().toLowerCase();
-      const list = words.filter(w => (filter==="all" || w.unit===filter) && (!key || `${w.word} ${w.meaning} ${w.unit}`.toLowerCase().includes(key)));
+      const list = visible.filter(w => (filter==="all" || w.unit===filter) && (!key || `${w.word} ${w.meaning} ${w.unit}`.toLowerCase().includes(key)));
       const root = $("#wordList");
       if (!list.length) { root.innerHTML = `<div class="empty"><span class="empty-icon">⌕</span>没有找到符合条件的单词</div>`; return; }
       root.innerHTML = `<div class="word-row head"><span>英文单词</span><span>音标</span><span>中文释义</span><span>单元</span><span></span></div>` + list.map(w => `
@@ -1761,7 +1802,7 @@ Clark|/klɑːk/|克拉克`]
 
     /* ==================== 5. OCR 图片识别与文本解析 ==================== */
     let parsedOcrWords = [];
-    $("#ocrBtn").addEventListener("click", () => $("#ocrDialog").showModal());
+    $("#ocrBtn").addEventListener("click", () => {$("#ocrUnit").value=(currentProfile==="grade7"?"初一":"三年级")+" OCR 导入";$("#ocrDialog").showModal();});
 
     // 根据页面中部的暗像素密度寻找两栏之间的空白带，返回分栏位置和可信度。
     function detectColumnSplit(image) {
@@ -1938,7 +1979,7 @@ Clark|/klɑːk/|克拉克`]
       const select = $("#studyUnit"); const unit = select.value || "all"; select.innerHTML = unitOptions(unit);
       const list = byUnit(select.value || "all"); studyIndex = Math.max(0, Math.min(studyIndex,list.length-1));
       $("#studyCount").textContent = list.length ? `${studyIndex+1} / ${list.length}` : "0 / 0";
-      const counts = [0,1,2].map(level=>words.filter(w=>w.familiarity===level).length);
+      const counts = [0,1,2].map(level=>accessibleWords().filter(w=>w.familiarity===level).length);
       $("#familiarKnown").textContent=counts[2]; $("#familiarLearning").textContent=counts[1]; $("#familiarReview").textContent=counts[0];
       const root=$("#studyCard"); const w=list[studyIndex];
       if(!w){root.innerHTML=`<div class="empty"><span class="empty-icon">▱</span>这个单元还没有单词</div>`;return;}
@@ -1971,7 +2012,7 @@ Clark|/klɑːk/|克拉克`]
       $("[data-study-next]",root).onclick=()=>{studyIndex=(studyIndex+1)%list.length;renderStudy();};
       $("[data-study-fav]",root).onclick=()=>{w.favorite=!w.favorite;saveWords();};
       $("[data-syllable-full]",root).onclick=()=>playSyllableSequence(w,root);
-      $$('[data-syllable-part]',root).forEach(button=>button.onclick=()=>{const i=Number(button.dataset.syllablePart);speak(syllables[i]);});
+      $$('[data-syllable-part]',root).forEach(button=>button.onclick=()=>{const i=Number(button.dataset.syllablePart);speakPhonicsText(syllables[i]);});
       $("[data-phonics-full]",root).onclick=()=>playPhonicsSequence(w,root);
       $$('[data-phonics-part]',root).forEach(button=>button.onclick=()=>{const i=Number(button.dataset.phonicsPart);speakPhonicsPiece(parts[i],i,parts);});
       if(exampleSpeech) $("[data-example-speak]",root).onclick=()=>speak(exampleSpeech);
@@ -1989,7 +2030,7 @@ Clark|/klɑːk/|克拉克`]
       const parts=phonicsParts(word);const syllables=syllableParts(word);
       $("[data-practice-word]",panel).onclick=()=>speak(word.word);
       $("[data-practice-syllable-full]",panel).onclick=()=>playSyllableSequence(word,panel);
-      $$('[data-practice-syllable]',panel).forEach(button=>button.onclick=()=>speak(syllables[Number(button.dataset.practiceSyllable)]));
+      $$('[data-practice-syllable]',panel).forEach(button=>button.onclick=()=>speakPhonicsText(syllables[Number(button.dataset.practiceSyllable)]));
       $("[data-practice-phonics-full]",panel).onclick=()=>playPhonicsSequence(word,panel);
       $$('[data-practice-phonics-part]',panel).forEach(button=>button.onclick=()=>{const index=Number(button.dataset.practicePhonicsPart);speakPhonicsPiece(parts[index],index,parts);});
     }
@@ -2016,7 +2057,7 @@ Clark|/klɑːk/|克拉克`]
     function renderMemoryQuestion() {
       const s=memoryState; if(s.index>=s.questions.length)return renderMemoryReport();
       const w=s.questions[s.index]; let dir=s.direction; if(dir==="mixed")dir=Math.random()>.5?"en-zh":"zh-en";
-      const answer=dir==="en-zh"?w.meaning:w.word; const pool=shuffle(words.filter(x=>x.id!==w.id)).slice(0,3).map(x=>dir==="en-zh"?x.meaning:x.word);
+      const answer=dir==="en-zh"?w.meaning:w.word; const pool=shuffle(accessibleWords().filter(x=>x.id!==w.id)).slice(0,3).map(x=>dir==="en-zh"?x.meaning:x.word);
       const choices=shuffle([answer,...pool]); s.locked=false; s.current={w,answer};
       const root=$("#memoryChallenge");
       root.innerHTML=`<div class="practice-stage"><div class="practice-top"><b>${s.index+1} / ${s.questions.length}</b><div class="progress"><span style="width:${s.index/s.questions.length*100}%"></span></div><span>答对 ${s.correct}</span></div><article class="card question-card"><div class="question-hint">${dir==="en-zh"?"请选择正确的中文释义":"请选择正确的英文单词"}</div><div class="question-main">${esc(dir==="en-zh"?w.word:w.meaning)}</div>${dir==="en-zh"?`<div class="ipa">${esc(w.phonetic)}</div>`:""}<div class="choice-grid">${choices.map(c=>`<button class="choice" data-choice="${esc(c)}">${esc(c)}</button>`).join("")}</div><p class="feedback" id="memoryFeedback"></p>${memoryPhonicsHtml(w,true)}<button class="btn btn-primary" id="memoryNext" hidden style="margin-top:16px">下一题 →</button></article></div>`;
@@ -2074,7 +2115,7 @@ Clark|/klɑːk/|克拉克`]
       $("#startDictation").onclick=()=>startDictation();
     }
     function startDictation(onlyWrong=false) {
-      const dictUnitSelect=$("#dictUnit"); const original=onlyWrong?words.filter(w=>w.wrongCount>0):byUnit(dictUnitSelect?dictUnitSelect.value||"all":"all");
+      const dictUnitSelect=$("#dictUnit"); const original=onlyWrong?accessibleWords().filter(w=>w.wrongCount>0):byUnit(dictUnitSelect?dictUnitSelect.value||"all":"all");
       // “全部单元”中可能包含同名词，先按英文去重，保证本次听写不重复出题。
       const seen={}; const source=original.filter(function(item){const key=item.word.trim().toLowerCase();if(!key||seen[key])return false;seen[key]=true;return true;});
       if(!source.length)return toast(onlyWrong?"错题本还是空的":"这个单元还没有单词");
@@ -2094,9 +2135,9 @@ Clark|/klɑːk/|克拉克`]
     function renderDictationReport(){const s=dictationState;const rate=Math.round(s.correct/s.list.length*100);$("#dictationRoot").innerHTML=`<article class="card report"><div class="score-ring" style="--score:${rate}%"><strong>${rate}%</strong></div><h2 style="text-align:center">听写完成</h2><p class="muted" style="text-align:center">共 ${s.list.length} 题，答对 ${s.correct} 题</p>${s.mistakes.length?`<h3>本次错词</h3><div class="mistake-list">${s.mistakes.map(m=>`<div class="mistake-item"><span><b>${esc(m.word)}</b> · ${esc(m.meaning)}</span><span>你的答案：${esc(m.yours)}</span></div>`).join("")}</div>`:`<div class="empty">全部正确，一颗小星星送给你！ ★</div>`}<div class="grid-2"><button class="btn" id="dictBack">返回设置</button><button class="btn btn-primary" id="dictAgain">再练一次</button></div></article>`;$("#dictBack").onclick=renderDictationSetup;$("#dictAgain").onclick=renderDictationSetup;}
 
     /* ==================== 10. 错题本 ==================== */
-    function renderWrongbook(){const list=words.filter(w=>w.wrongCount>0).sort((a,b)=>b.wrongCount-a.wrongCount);$("#wrongSummary").textContent=list.length?`共有 ${list.length} 个错词，建议从错误最多的开始复习。`:"暂时没有错题，继续保持！";$("#practiceWrongBtn").disabled=!list.length;$("#clearWrongBtn").disabled=!list.length;$("#wrongGrid").innerHTML=list.length?list.map(w=>`<article class="card wrong-card"><div style="display:flex;justify-content:space-between;gap:10px"><h3>${esc(w.word)}</h3><span class="pill pill-red">错 ${w.wrongCount} 次</span></div><div class="ipa">${esc(w.phonetic)}</div><p>${esc(w.meaning)}</p><button class="btn btn-ghost" data-wrong-speak="${w.id}">🔊 听发音</button></article>`).join(""):`<div class="card empty" style="grid-column:1/-1"><span class="empty-icon">✓</span>错题本空空的，真不错！</div>`;$$('[data-wrong-speak]').forEach(b=>b.onclick=()=>{const w=words.find(x=>x.id===b.dataset.wrongSpeak);if(w)speak(w.word);});}
+    function renderWrongbook(){const list=accessibleWords().filter(w=>w.wrongCount>0).sort((a,b)=>b.wrongCount-a.wrongCount);$("#wrongSummary").textContent=list.length?`共有 ${list.length} 个错词，建议从错误最多的开始复习。`:"暂时没有错题，继续保持！";$("#practiceWrongBtn").disabled=!list.length;$("#clearWrongBtn").disabled=!list.length;$("#wrongGrid").innerHTML=list.length?list.map(w=>`<article class="card wrong-card"><div style="display:flex;justify-content:space-between;gap:10px"><h3>${esc(w.word)}</h3><span class="pill pill-red">错 ${w.wrongCount} 次</span></div><div class="ipa">${esc(w.phonetic)}</div><p>${esc(w.meaning)}</p><button class="btn btn-ghost" data-wrong-speak="${w.id}">🔊 听发音</button></article>`).join(""):`<div class="card empty" style="grid-column:1/-1"><span class="empty-icon">✓</span>错题本空空的，真不错！</div>`;$$('[data-wrong-speak]').forEach(b=>b.onclick=()=>{const w=words.find(x=>x.id===b.dataset.wrongSpeak);if(w)speak(w.word);});}
     $("#practiceWrongBtn").onclick=()=>startDictation(true);
-    $("#clearWrongBtn").onclick=()=>{if(confirm("确定清空全部错题次数吗？单词不会被删除。")){words.forEach(w=>w.wrongCount=0);saveWords();toast("错题记录已清空");}};
+    $("#clearWrongBtn").onclick=()=>{if(confirm("确定清空当前账号的全部错题次数吗？单词不会被删除。")){accessibleWords().forEach(w=>w.wrongCount=0);saveWords();toast("当前账号的错题记录已清空");}};
 
     /* ==================== 11. 词库备份与恢复 ==================== */
     $("#backupBtn").addEventListener("click",()=>{
@@ -2104,10 +2145,10 @@ Clark|/klɑːk/|克拉克`]
     });
     $("#restoreBtn").addEventListener("click",()=>$("#restoreFile").click());
     $("#clearAllWordsBtn").addEventListener("click",()=>{
-      if(!words.length) return toast("词库已经是空的");
-      const count=words.length;
-      if(!confirm(`确定清空词库中的 ${count} 个单词吗？\n\n收藏、熟悉度和错题记录也会一起删除。此操作不能撤销，建议先备份。`)) return;
-      words=[]; studyIndex=0; memoryState=null; memoryFlashState=null; dictationState=null;
+      const visible=accessibleWords();if(!visible.length) return toast("当前账号的词库已经是空的");
+      const count=visible.length;const visibleIds=new Set(visible.map(function(word){return word.id;}));
+      if(!confirm(`确定清空${LEARNING_PROFILES[currentProfile].label}可见的 ${count} 个单词吗？\n\n收藏、熟悉度和错题记录也会一起删除。此操作不能撤销，建议先备份。`)) return;
+      words=words.filter(function(word){return !visibleIds.has(word.id);});studyIndex=0; memoryState=null; memoryFlashState=null; dictationState=null;
       $("#searchInput").value=""; $("#libraryUnitFilter").value="all";
       saveWords(); renderMemorySetup(); renderFlashSetup(); renderDictationSetup();
       toast(`已清空 ${count} 个单词`);
